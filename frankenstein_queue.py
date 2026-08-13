@@ -12,8 +12,8 @@ class FrankensteinQueue:
         self.ready_heap = []
         self.sequence = 0
         self.mode = mode
-        # One lock guards both heaps and the sequence counter
-        # pop moves items between heaps, so they can't be locked independently
+        # One lock guards both heaps and the sequence counter; pop moves
+        # items between heaps, so they can't be locked independently.
         self._lock = threading.Lock()
 
     def _key(self, priority, seq):
@@ -43,4 +43,11 @@ class FrankensteinQueue:
             if self.ready_heap:
                 _, _, item = heapq.heappop(self.ready_heap)
                 return item
+            return Non    def next_available_at(self):
+        with self._lock:
+            self._promote_ready()
+            if self.delay_heap:
+                return self.delay_heap[0][0]
             return None
+
+
