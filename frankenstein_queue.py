@@ -12,7 +12,7 @@ class FrankensteinQueue:
         self.use_priority = use_priority
         self.mode = mode
         self.delay_heap = []  # (available_at, seq, item, priority)
-        self.ready_heap = []  # (priority_key, seq_key, seq, item)
+        self.ready_heap = []  # (priority_key, seq_key, seq, item, priority)
         self.sequence = 0
         # One lock guards the heaps, the sequence counter and the log: pop
         # moves items between heaps, and log order must match memory order.
@@ -39,19 +39,29 @@ class FrankensteinQueue:
         if not os.path.exists(self.log_path):
             return
         pending = {}
-        with open(self.log_path, encoding="utf-8") as f:
+        good_bytes = 0
+        with open(self.log_path, "rb") as f:
             for line in f:
+                # A complete write always ends in a newline; a torn line from
+                # a crash mid-write doesn't (or won't parse). Stop there.
+                if not line.endswith(b"\n"):
+                    break
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
-                    # A torn final line from a crash mid-write;
-                    # everything before it was fsync'd, so stop here.
                     break
+                good_bytes += len(line)
                 if record["op"] == "push":
                     pending[record["seq"]] = record
                     self.sequence = max(self.sequence, record["seq"])
                 elif record["op"] == "pop":
                     pending.pop(record["seq"], None)
+        # Truncate the torn tail, otherwise the next append glues onto it,
+        # producing an unparseable line that loses every record after it
+        # on the following restart.
+        if good_bytes < os.path.getsize(self.log_path):
+            with open(self.log_path, "r+b") as f:
+                f.truncate(good_bytes)
         now = time.time()
         for seq, record in pending.items():
             item, priority = record["item"], record["priority"]
@@ -60,7 +70,7 @@ class FrankensteinQueue:
                 heapq.heappush(self.delay_heap, (available_at, seq, item, priority))
             else:
                 pk, sk = self._key(priority, seq)
-                heapq.heappush(self.ready_heap, (pk, sk, seq, item))
+                heapq.heappush(self.ready_heap, (pk, sk, seq, item, priority))
 
     def push(self, item, priority=0, delay=0):
         with self._lock:
@@ -73,20 +83,20 @@ class FrankensteinQueue:
                 heapq.heappush(self.delay_heap, (available_at, seq, item, priority))
             else:
                 pk, sk = self._key(priority, seq)
-                heapq.heappush(self.ready_heap, (pk, sk, seq, item))
+                heapq.heappush(self.ready_heap, (pk, sk, seq, item, priority))
             return seq
 
     def _promote_ready(self):
         while self.delay_heap and self.delay_heap[0][0] <= time.time():
             _, seq, item, priority = heapq.heappop(self.delay_heap)
             pk, sk = self._key(priority, seq)
-            heapq.heappush(self.ready_heap, (pk, sk, seq, item))
+            heapq.heappush(self.ready_heap, (pk, sk, seq, item, priority))
 
     def pop(self):
         with self._lock:
             self._promote_ready()
             if self.ready_heap:
-                _, _, seq, item = heapq.heappop(self.ready_heap)
+                _, _, seq, item, _ = heapq.heappop(self.ready_heap)
                 self._append_log({"op": "pop", "seq": seq})
                 return item
             return None
@@ -122,8 +132,8 @@ class FrankensteinQueue:
             ]
             records += [
                 {"op": "push", "seq": seq, "item": item,
-                 "priority": (-pk if self.use_priority else 0), "available_at": None}
-                for pk, _, seq, item in self.ready_heap
+                 "priority": priority, "available_at": None}
+                for _, _, seq, item, priority in self.ready_heap
             ]
             records.sort(key=lambda r: r["seq"])
             tmp_path = self.log_path + ".tmp"

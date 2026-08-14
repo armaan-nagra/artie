@@ -66,8 +66,9 @@ busy-polling), and `demo` runs the scripted tour above.
   to the ready heap on each operation once their time passes.
 - Every push and pop is appended to `queue.log` and fsync'd before memory is
   updated. Startup replays the log to rebuild pending messages; a torn last
-  line from a mid-write crash is skipped. `/compact` rewrites the log through
-  a temp file and atomic rename.
+  line from a mid-write crash is truncated away, so later appends can't glue
+  onto it and corrupt the log. `/compact` rewrites the log through a temp
+  file and atomic rename.
 - One lock guards the heaps and the log, so log order always matches memory
   order. The fsync is the throughput bottleneck, not the lock.
 
